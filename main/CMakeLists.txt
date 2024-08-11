@@ -39,7 +39,14 @@ list(APPEND SOURCE_FILES ${C_FILES})
 list(APPEND SOURCE_FILES ${CC_FILES})
 list(APPEND SOURCE_FILES ${MODEL_FILES})
 
-idf_component_register(SRCS "main.cpp" "${SOURCE_FILES}"
-                       INCLUDE_DIRS "${include_dirs}")
+idf_component_register(
+    SRCS 
+        "connect_wifi.c"
+        "app_camera_esp.c"
+        "main.cpp" 
+        "${SOURCE_FILES}"
+    INCLUDE_DIRS
+        "include"
+        "${include_dirs}")
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -std=gnu++17)

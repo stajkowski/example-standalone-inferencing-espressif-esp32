@@ -3,3 +3,5 @@ build/
 edge-impulse-sdk/
 model-parameters/
 tflite-model/
+.vscode
+managed_components
