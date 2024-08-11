@@ -63,7 +63,7 @@ limitations under the License.
  * FRAMESIZE_SXGA,     // 1280x1024
  * FRAMESIZE_UXGA,     // 1600x1200
  */
-#define CAMERA_FRAME_SIZE FRAMESIZE_VGA
+#define CAMERA_FRAME_SIZE FRAMESIZE_QVGA
 
 #define XCLK_FREQ_HZ 15000000
 

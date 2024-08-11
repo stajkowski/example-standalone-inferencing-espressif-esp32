@@ -28,6 +28,7 @@
 #include "freertos/task.h"
 
 #include "edge-impulse-sdk/classifier/ei_run_classifier.h"
+#include "edge-impulse-sdk/dsp/image/image.hpp"
 
 extern "C" {
     #include "app_camera_esp.h"
@@ -41,8 +42,8 @@ extern "C" {
 #include "esp_idf_version.h"
 #include "esp_http_server.h"
 
-#define EI_CAMERA_RAW_FRAME_BUFFER_COLS           640
-#define EI_CAMERA_RAW_FRAME_BUFFER_ROWS           450
+#define EI_CAMERA_RAW_FRAME_BUFFER_COLS           320
+#define EI_CAMERA_RAW_FRAME_BUFFER_ROWS           240
 #define EI_CAMERA_FRAME_BYTE_SIZE                 3
 
 #define PART_BOUNDARY "123456789000000000000987654321"
@@ -53,57 +54,80 @@ static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 static const char *TAG = "esp32-cam Webserver";
 
 uint8_t *snapshot_buf; //points to the output of the capture
+camera_fb_t* fb = NULL;
 
 
 // Get an image from the camera module
 esp_err_t get_image(int image_width, int image_height, uint8_t* image_data) {
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) {
-    ESP_LOGE("camera", "Camera capture failed");
-    return false;
-  }
+    bool do_resize = false;
 
-  ei_printf("Image Captured\n");
-  // We have initialised camera to grayscale
-  // Just quantize to int8_t
-  for (int i = 0; i < image_width * image_height; i++) {
-    image_data[i] = ((uint8_t *) fb->buf)[i] ^ 0x80;
-  }
+    fb = esp_camera_fb_get();
+    if (!fb) {
+        ESP_LOGE("camera", "Camera capture failed");
+        return false;
+    }
 
-  esp_camera_fb_return(fb);
-  /* here the esp camera can give you grayscale image directly */
-  return true;
+    ei_printf("Image Captured\n");
+
+    /*  Pay attention to this PIXFORMAT_RGB565 parameter in camera config. Need to be equal or convertion will fail  */
+    bool converted = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_YUV422, snapshot_buf);
+
+    esp_camera_fb_return(fb);
+    /* here the esp camera can give you grayscale image directly */
+
+    if (!converted) {
+        ei_printf("Conversion failed\n");
+        return false;
+    }
+
+    if ((image_width != EI_CAMERA_RAW_FRAME_BUFFER_COLS)
+        || (image_height != EI_CAMERA_RAW_FRAME_BUFFER_ROWS)) {
+        do_resize = true;
+        ei_printf("Resizing image\n");
+    }
+
+    if (do_resize) {
+        ei::image::processing::crop_and_interpolate_rgb888(
+        image_data,
+        EI_CAMERA_RAW_FRAME_BUFFER_COLS,
+        EI_CAMERA_RAW_FRAME_BUFFER_ROWS,
+        image_data,
+        image_width,
+        image_height);
+        ei_printf("Resizing complete\n");
+    }
+
+    return true;
 }
 
 static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr)
 {
-  // we already have a RGB888 buffer, so recalculate offset into pixel index
-  size_t pixel_ix = offset * 3;
-  size_t pixels_left = length;
-  size_t out_ptr_ix = 0;
+    // we already have a RGB888 buffer, so recalculate offset into pixel index
+    size_t pixel_ix = offset * 3;
+    size_t pixels_left = length;
+    size_t out_ptr_ix = 0;
 
-  while (pixels_left != 0) {
-    out_ptr[out_ptr_ix] = (snapshot_buf[pixel_ix] << 16) + (snapshot_buf[pixel_ix + 1] << 8) + snapshot_buf[pixel_ix + 2];
+    while (pixels_left != 0) {
+        out_ptr[out_ptr_ix] = (snapshot_buf[pixel_ix] << 16) + (snapshot_buf[pixel_ix + 1] << 8) + snapshot_buf[pixel_ix + 2];
 
-    // go to the next pixel
-    out_ptr_ix++;
-    pixel_ix += 3;
-    pixels_left--;
-  }
-  // and done!
-  return 0;
+        // go to the next pixel
+        out_ptr_ix++;
+        pixel_ix += 3;
+        pixels_left--;
+    }
+    // and done!
+    return 0;
 }
 
 esp_err_t jpg_stream_httpd_handler(httpd_req_t *req){
-    camera_fb_t * fb = NULL;
     esp_err_t res = ESP_OK;
     size_t _jpg_buf_len;
     uint8_t * _jpg_buf;
     char * part_buf[64];
     static int64_t last_frame = 0;
-    if(!last_frame) {
-        last_frame = esp_timer_get_time();
-    }
+    // if(!last_frame) {
+    //    last_frame = esp_timer_get_time();
+    //}
 
     res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
     if(res != ESP_OK){
@@ -111,17 +135,17 @@ esp_err_t jpg_stream_httpd_handler(httpd_req_t *req){
     }
 
     while(true){
-        fb = esp_camera_fb_get();
+        // fb = esp_camera_fb_get();
         if (!fb) {
             ESP_LOGE(TAG, "Camera capture failed");
             res = ESP_FAIL;
-            break;
+            continue;
         }
         if(fb->format != PIXFORMAT_JPEG){
             bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
             if(!jpeg_converted){
                 ESP_LOGE(TAG, "JPEG compression failed");
-                esp_camera_fb_return(fb);
+                //esp_camera_fb_return(fb);
                 res = ESP_FAIL;
             }
         } else {
@@ -143,17 +167,21 @@ esp_err_t jpg_stream_httpd_handler(httpd_req_t *req){
         if(fb->format != PIXFORMAT_JPEG){
             free(_jpg_buf);
         }
-        esp_camera_fb_return(fb);
+        // esp_camera_fb_return(fb);
         if(res != ESP_OK){
-            break;
+            continue;
         }
+
+        /*
         int64_t fr_end = esp_timer_get_time();
         int64_t frame_time = fr_end - last_frame;
         last_frame = fr_end;
-        frame_time /= 2000;
+        frame_time /= 1000;
         ESP_LOGI(TAG, "MJPG: %uKB %ums (%.1ffps)",
             (uint32_t)(_jpg_buf_len/1024),
             (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time);
+        */
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 
     last_frame = 0;
@@ -250,6 +278,7 @@ extern "C" int app_main()
     ei_printf("Webserver started\n");
 
     snapshot_buf = (uint8_t*)malloc(EI_CAMERA_RAW_FRAME_BUFFER_COLS * EI_CAMERA_RAW_FRAME_BUFFER_ROWS * EI_CAMERA_FRAME_BYTE_SIZE);
+    // snapshot_buf = (uint8_t*)heap_caps_malloc(EI_CAMERA_RAW_FRAME_BUFFER_COLS * EI_CAMERA_RAW_FRAME_BUFFER_ROWS * EI_CAMERA_FRAME_BYTE_SIZE, MALLOC_CAP_SPIRAM);
     // check if allocation was successful
     if (snapshot_buf == nullptr) {
         ei_printf("ERR: Failed to allocate snapshot buffer!\n");
